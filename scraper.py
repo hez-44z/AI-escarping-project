@@ -1,118 +1,454 @@
-import json
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from concurrent.futures import ThreadPoolExecutor
+from selenium.webdriver.common.keys import Keys
 import time
-from playwright.sync_api import sync_playwright
 
-def scroll_down(page, scroll_step=1000, max_scrolls=5, pause=2):
+
+def scrape_grailed(search_query):
     """
-    Scrolls down the page to load more items in case of infinite scroll.
-    - scroll_step: how many pixels to scroll each time.
-    - max_scrolls: how many times we scroll down.
-    - pause: how many seconds to wait after each scroll.
+    Scrapes the first 10 listings from Grailed for a given search query.
     """
-    for i in range(max_scrolls):
-        page.mouse.wheel(0, scroll_step * (i + 1))
-        time.sleep(pause)
-    # Final wait to ensure dynamic content is fully loaded
-    time.sleep(3)
+    # ChromeDriver setup
+    options = Options()
+    # options.add_argument("--headless")  # Uncomment for headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
 
-def scrape_depop(search_query="vintage t-shirt"):
-    """
-    Searches Depop for the given query using the selectors verified in DevTools.
-    Returns a list of items (price, image, link, etc.) as dictionaries.
-    """
-    url = f"https://www.depop.com/search/?q={search_query}"
 
-    with sync_playwright() as p:
-        # 1) Launch browser (non-headless to debug visually)
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+    service = Service("C:/Program Files/ChromeDriver/chromedriver.exe")  # Update your ChromeDriver path
+    driver = webdriver.Chrome(service=service, options=options)
 
-        # 2) Go to Depop search page
-        page.goto(url, timeout=15000)
 
-        # 3) Attempt to handle cookie/consent overlays
-        accept_selectors = [
-            "button:has-text('Accept')",
-            "#onetrust-accept-btn-handler",
-            "button:has-text('Agree')",
-        ]
-        for sel in accept_selectors:
-            try:
-                page.wait_for_selector(sel, timeout=3000)
-                page.click(sel)
-                time.sleep(2)
-                print(f"Clicked accept button -> {sel}")
-                break
-            except:
-                pass
+    try:
+        # Navigate to Grailed homepage
+        url = "https://www.grailed.com/"
+        print(f"Navigating to URL: {url}")
+        driver.get(url)
 
-        # 4) Scroll down to load more results
-        scroll_down(page, scroll_step=1000, max_scrolls=5, pause=2)
 
-        # 5) Additional wait to ensure products are rendered
-        page.wait_for_load_state("networkidle")
+        # Allow page to load
         time.sleep(3)
 
-        # 6) Each product is in a div with this class
-        product_selector = "div.styles_productCardRoot__DaYPT"
 
+        # Click the search bar to trigger the sign-in pop-up
+        search_input = driver.find_element(By.ID, "header_search-input")
+        search_input.click()
+        print("Clicked on the search bar to trigger the sign-in pop-up.")
+
+
+        # Dismiss the sign-in pop-up using JavaScript
         try:
-            # Wait for at least one product card
-            page.wait_for_selector(product_selector, timeout=5000)
-        except:
-            print("No product cards found. Possibly site changed or blocked.")
-            browser.close()
-            return []
+            driver.execute_script(
+                "document.querySelector('.ReactModal__Overlay').style.display='none';"
+            )
+            print("Sign-in pop-up removed using JavaScript.")
+        except Exception as js_error:
+            print(f"JavaScript method failed: {js_error}")
 
-        product_cards = page.query_selector_all(product_selector)
-        print(f"Found {len(product_cards)} product cards.")
 
-        results = []
-        for product in product_cards:
+        # Retry clicking the search bar
+        search_input.click()
+        print("Clicked on the search bar again after dismissing the pop-up.")
+
+
+        # Enter the search query
+        search_input.send_keys(search_query)
+        print(f"Entered search query: {search_query}")
+
+
+        # Submit the search
+        search_button = driver.find_element(By.CSS_SELECTOR, "button[title='Submit']")
+        search_button.click()
+        print("Search button clicked.")
+
+
+        # Allow results to load
+        time.sleep(5)
+
+
+        # Verify if search results loaded
+        results = driver.find_elements(By.CLASS_NAME, "feed-item")
+        print(f"Found {len(results)} search results.")
+
+
+        # Scrape the first 10 listings
+        scraped_results = []
+        for index, result in enumerate(results[:10]):
             try:
-                # ---- Link ----
-                link_el = product.query_selector("a.styles_unstyledLink__DsttP")
-                if link_el:
-                    href = link_el.get_attribute("href")
-                    link = "https://www.depop.com" + href if href else "No link"
-                else:
-                    link = "No link"
+                # Extract Title
+                title = result.find_element(By.CSS_SELECTOR, "p.ListingMetadata-module__title___Rsj55").text
+            except Exception:
+                title = "Not found"
 
-                # ---- Price ----
-                price_el = product.query_selector("p.styles_price__H8qdh")
-                price = price_el.inner_text() if price_el else "No price"
 
-                # ---- Image ----
-                img_el = product.query_selector("img._mainImage_e5j9l_11")
-                image = img_el.get_attribute("src") if img_el else "No image"
+            try:
+                # Extract Size
+                size = result.find_element(By.CSS_SELECTOR, "p.ListingMetadata-module__size___e9naE").text
+            except Exception:
+                size = "Not found"
 
-                # ---- (Optional) More Info ----
-                # For example, the next <p> elements might be size or brand.
-                # We'll collect them all:
-                p_tags = product.query_selector_all("p._text_bevez_41")
-                # The first p might be the price already, but if you want the next lines:
-                # e.g. second p is the size, third p might be brand/category
-                size = brand = None
-                if len(p_tags) >= 2:
-                    # p_tags[1] could be size
-                    size = p_tags[1].inner_text()
-                if len(p_tags) >= 3:
-                    # p_tags[2] could be brand / other info
-                    brand = p_tags[2].inner_text()
+
+            try:
+                # Extract Price
+                price = result.find_element(By.CSS_SELECTOR, "span.Price-module__onSale___1pIHp").text
+            except Exception:
+                price = "Not found"
+
+
+            try:
+                # Extract Image URL
+                image_url = result.find_element(By.CSS_SELECTOR, "img.Image-module__crop___nWp1j").get_attribute("src")
+            except Exception:
+                image_url = "Not found"
+
+
+            try:
+                # Extract Product Link
+                product_link = result.find_element(By.CSS_SELECTOR, "a.listing-item-link").get_attribute("href")
+            except Exception:
+                product_link = "Not found"
+
+
+            # Append to results
+            scraped_results.append({
+                "title": title,
+                "size": size,
+                "price": price,
+                "image_url": image_url,
+                "product_link": product_link,
+            })
+
+
+        return scraped_results
+
+
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        return []
+    finally:
+        driver.quit()
+
+
+
+
+def scrape_depop(search_query):
+    """
+    Scrapes the first 10 listings from Depop for a given search query.
+    """
+    options = Options()
+    # options.add_argument("--headless")  # Disable headless mode for visible browser
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+
+    service = Service("C:/Program Files/ChromeDriver/chromedriver.exe")  # Update with your ChromeDriver path
+    driver = webdriver.Chrome(service=service, options=options)
+
+
+    # Build the Depop search URL
+    url = f"https://www.depop.com/search/?q={search_query.replace(' ', '+')}"
+    print(f"Navigating to URL: {url}")
+    driver.get(url)
+
+
+    # Handle the "Accept" button
+    try:
+        accept_button = driver.find_element(By.CSS_SELECTOR, "button[data-testid='cookieBanner__acceptAllButton']")
+        accept_button.click()
+        print("Accepted cookies/modal.")
+        time.sleep(2)
+    except Exception as e:
+        print(f"No 'Accept' button found or already handled: {e}")
+
+
+    # Scroll the page to ensure all elements are visible
+    def scroll_page():
+        print("Scrolling the page...")
+        for _ in range(1):  # Adjust the range if necessary
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.PAGE_DOWN)
+            time.sleep(0.5)  # Allow time for dynamic loading
+
+
+    scroll_page()
+
+
+    # Extract product data
+    results = []
+    try:
+        product_containers = driver.find_elements(By.CSS_SELECTOR, "li.styles__ProductCardContainer-sc-ec533c9e-7")
+        print(f"Found {len(product_containers)} product containers.")
+
+
+        for index, product in enumerate(product_containers[:10]):  # Limit to first 10 results
+            print(f"Processing product {index + 1}...")
+
+
+            # Extract details
+            try:
+                price = product.find_element(By.CSS_SELECTOR, "p[aria-label='Price'].Price-styles__FullPrice-sc-1c510ed0-0").text
+            except Exception:
+                price = "Not found"
+
+
+            try:
+                size = product.find_element(By.CSS_SELECTOR, "p[aria-label='Size'].styles__StyledSizeText-sc-ec533c9e-12").text
+            except Exception:
+                size = "Not found"
+
+
+            try:
+                image_url = product.find_element(By.CSS_SELECTOR, "img.sc-hjbplR").get_attribute("src")
+            except Exception:
+                image_url = "Not found"
+
+
+            try:
+                brand = product.find_element(By.CSS_SELECTOR, "p.styles__StyledBrandNameText-sc-ec533c9e-21").text
+            except Exception:
+                brand = "Not found"
+
+
+            try:
+                link = product.find_element(By.CSS_SELECTOR, "a.styles__ProductCard-sc-ec533c9e-4").get_attribute("href")
+            except Exception:
+                link = "Not found"
+
+
+            results.append({
+                "title": brand,
+                "price": price,
+                "size": size,
+                "image_url": image_url,
+                "link": link,
+            })
+    except Exception as e:
+        print(f"Error extracting products: {e}")
+    finally:
+        driver.quit()
+
+
+    return results
+
+
+def scrape_poshmark(search_query):
+    """
+    Scrapes the first 10 listings from Poshmark for a given search query.
+    """
+    options = Options()
+    # options.add_argument("--headless")  # Uncomment for headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+
+    service = Service("C:/Program Files/ChromeDriver/chromedriver.exe")  # Update your ChromeDriver path
+    driver = webdriver.Chrome(service=service, options=options)
+
+
+    # Build the Poshmark search URL
+    url = f"https://poshmark.com/search?query={search_query.replace(' ', '%20')}&type=listings&src=dir"
+    print(f"Navigating to URL: {url}")
+    driver.get(url)
+
+
+    results = []
+
+
+    try:
+        # Wait for the page to load
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.card"))
+        )
+        product_containers = driver.find_elements(By.CSS_SELECTOR, "div.card")
+        print(f"Found {len(product_containers)} product containers.")
+
+
+        # Scrape up to the first 10 listings
+        for index, container in enumerate(product_containers[:10]):
+            print(f"Processing product {index + 1}...")
+
+
+            try:
+                title = container.find_element(By.CSS_SELECTOR, "a.tile__title").text.strip()
+            except Exception as e:
+                title = "Not found"
+                print(f"  Title Error: {e}")
+
+
+            try:
+                price = container.find_element(By.CSS_SELECTOR, "span.p--t--1.fw--bold").text.strip()
+            except Exception as e:
+                price = "Not found"
+                print(f"  Price Error: {e}")
+
+
+            try:
+                size = container.find_element(By.CSS_SELECTOR, "a.tile__details__pipe__size").text.strip().replace("Size: ", "")
+            except Exception as e:
+                size = "Not found"
+                print(f"  Size Error: {e}")
+
+
+            try:
+                raw_link = container.find_element(By.CSS_SELECTOR, "a.tile__title").get_attribute("href")
+                link = f"https://poshmark.com{raw_link}" if raw_link.startswith("/") else raw_link
+            except Exception as e:
+                link = "Not found"
+                print(f"  Link Error: {e}")
+
+
+            try:
+                image_url = container.find_element(By.CSS_SELECTOR, "img.ovf--h.d--b").get_attribute("src")
+            except Exception as e:
+                image_url = "Not found"
+                print(f"  Image URL Error: {e}")
+
+
+            results.append({
+                "title": title,
+                "price": price,
+                "size": size,
+                "link": link,
+                "image_url": image_url,
+            })
+
+
+    except Exception as e:
+        print(f"Error extracting data: {e}")
+
+
+    finally:
+        driver.quit()
+
+
+    return results
+
+
+
+
+def scrape_ebay(search_query):
+    """
+    Scrapes the first 10 listings from eBay for a given search query.
+    """
+    options = Options()
+    # options.add_argument("--headless")  # Uncomment for headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+
+    service = Service("C:/Program Files/ChromeDriver/chromedriver.exe")  # Update your ChromeDriver path
+    driver = webdriver.Chrome(service=service, options=options)
+
+
+    # Build the eBay search URL
+    url = f"https://www.ebay.com/sch/i.html?_nkw={search_query.replace(' ', '+')}&_sop=12"
+    print(f"Navigating to URL: {url}")
+    driver.get(url)
+
+
+    results = []
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.s-item__wrapper"))
+        )
+        product_wrappers = driver.find_elements(By.CSS_SELECTOR, "div.s-item__wrapper")
+        print(f"Found {len(product_wrappers)} potential product wrappers.")
+
+
+        for index, wrapper in enumerate(product_wrappers):
+            print(f"Processing wrapper {index + 1}...")
+            try:
+                title = wrapper.find_element(By.CSS_SELECTOR, ".s-item__title").text.strip()
+                if not title or "Shop on eBay" in title:
+                    continue
+
+
+                try:
+                    price = wrapper.find_element(By.CSS_SELECTOR, "span.s-item__price").text.strip()
+                except Exception:
+                    price = "Not found"
+
+
+                try:
+                    image_url = wrapper.find_element(By.CSS_SELECTOR, "div.s-item__image-wrapper img").get_attribute("src")
+                except Exception:
+                    image_url = "Not found"
+
+
+                try:
+                    item_url = wrapper.find_element(By.CSS_SELECTOR, "a.s-item__link").get_attribute("href")
+                except Exception:
+                    item_url = "Not found"
+
 
                 results.append({
+                    "title": title,
                     "price": price,
-                    "image": image,
-                    "link": link,
-                    "size": size or "Unknown",
-                    "brand_or_category": brand or "Unknown"
+                    "image_url": image_url,
+                    "item_url": item_url,
                 })
+
+
+                if len(results) == 10:
+                    break
+
+
             except Exception as e:
-                print(f"Error scraping a product: {e}")
+                print(f"Error processing wrapper {index + 1}: {e}")
 
-        browser.close()
-        return results
 
-if __name__ == "__main__":
-    data = scrape_depop("vintage t-shirt")
-    print(json.dumps(data[:10], indent=4))
+    except Exception as e:
+        print(f"Error locating product wrappers: {e}")
+    finally:
+        driver.quit()
+
+
+    return results
+
+
+def scrape_all_platforms(search_query):
+    """
+    Unified scraper that runs scrapers for all platforms concurrently.
+    """
+    platforms = {
+        "Grailed": scrape_grailed,
+        "Depop": scrape_depop,
+        "Poshmark": scrape_poshmark,
+        "eBay": scrape_ebay,
+    }
+
+
+    results = []
+
+
+    def scrape_platform(name, scraper_function):
+        try:
+            platform_results = scraper_function(search_query)
+            print(f"{name}: Retrieved {len(platform_results)} results.")
+            for result in platform_results:
+                result["platform"] = name  # Add platform identifier
+            return platform_results
+        except Exception as e:
+            print(f"Error scraping {name}: {e}")
+            return []
+
+
+    # Use ThreadPoolExecutor for concurrency
+    with ThreadPoolExecutor(max_workers=len(platforms)) as executor:
+        futures = {executor.submit(scrape_platform, name, func): name for name, func in platforms.items()}
+        for future in futures:
+            results.extend(future.result())
+
+
+    # Shuffle results for a randomized mix
+    import random
+    random.shuffle(results)
+    return results
